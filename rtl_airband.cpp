@@ -61,6 +61,11 @@
 #include <cstdlib>
 #include <ctime>
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+
 #include <ogg/ogg.h>
 #include <vorbis/vorbisenc.h>
 #include <shout/shout.h>
@@ -99,6 +104,8 @@ extern "C" void fftwave(float* dest, GPU_FFT_COMPLEX* src, int* sizes, int* bins
 
 using namespace std;
 
+
+
 struct channel_t {
     float wavein[WAVE_LEN];  // FFT output waveform
     float waveref[WAVE_LEN]; // for power level calculation
@@ -118,6 +125,14 @@ struct channel_t {
     char mountpoint[256];
     shout_t * shout;
     lame_t lame;
+	
+	int ena_rec;
+	char recpath[256];
+	int append;
+	FILE *mp3_file;
+	char active;
+    int filenum;	
+	long double EndTime;
 };
 
 struct device_t {
@@ -215,6 +230,24 @@ void* rtlsdr_exec(void* params) {
 void mp3_setup(channel_t* channel) {
     int ret;
     shout_t * shouttemp = shout_new();
+	
+	if (channel->lame == NULL)
+	{
+		if(quiet) printf("Connected to %s:%d/%s\n", 
+            channel->hostname, channel->port, channel->mountpoint);
+        channel->lame = lame_init();
+        lame_set_in_samplerate(channel->lame, WAVE_RATE);
+        lame_set_VBR(channel->lame, vbr_off);
+        lame_set_brate(channel->lame, 16);
+        lame_set_quality(channel->lame, 7);
+        lame_set_out_samplerate(channel->lame, MP3_RATE);
+        lame_set_num_channels(channel->lame, 1);
+        lame_set_mode(channel->lame, MONO);
+        lame_init_params(channel->lame);
+	}
+	
+	
+	
     if (shouttemp == NULL) {
         printf("cannot allocate\n");
     }
@@ -272,7 +305,7 @@ void mp3_setup(channel_t* channel) {
     }
  
     if (ret == SHOUTERR_CONNECTED) {
-        if(quiet) printf("Connected to %s:%d/%s\n", 
+/*        if(quiet) printf("Connected to %s:%d/%s\n", 
             channel->hostname, channel->port, channel->mountpoint);
         channel->lame = lame_init();
         lame_set_in_samplerate(channel->lame, WAVE_RATE);
@@ -284,7 +317,7 @@ void mp3_setup(channel_t* channel) {
         lame_set_mode(channel->lame, MONO);
         lame_init_params(channel->lame);
         SLEEP(100);
-        channel->shout = shouttemp;
+  */      channel->shout = shouttemp;
     } else {
         if(quiet) printf("Could not connect to %s:%d/%s\n",
             channel->hostname, channel->port, channel->mountpoint);
@@ -294,13 +327,134 @@ void mp3_setup(channel_t* channel) {
 }
 
 unsigned char lamebuf[22000];
+/*struct record_t {
+    int frequency;
+    char active;
+    int filenum;
+    FILE *mp3;
+};*/
+/* CHANNEL
+	int ena_rec;
+	char recpath[256];
+	int append;
+	FILE *mp3_file;
+	char active;
+    int filenum;	
+	long double EndTime;
+  */  
+  //record_t recorder[32];
+
 void mp3_process(channel_t* channel) {
-    if (channel->shout == NULL) {
-        return;
-    }
+    int i, write;
+    unsigned char mp3_buffer[22000];
+	
+	if (channel->lame == NULL)
+	{
+		if(quiet) printf("Connected to %s:%d/%s\n", 
+            channel->hostname, channel->port, channel->mountpoint);
+        channel->lame = lame_init();
+        lame_set_in_samplerate(channel->lame, WAVE_RATE);
+        lame_set_VBR(channel->lame, vbr_off);
+        lame_set_brate(channel->lame, 16);
+        lame_set_quality(channel->lame, 7);
+        lame_set_out_samplerate(channel->lame, MP3_RATE);
+        lame_set_num_channels(channel->lame, 1);
+        lame_set_mode(channel->lame, MONO);
+        lame_init_params(channel->lame);
+	}
+	
+
+//    if (channel->shout == NULL) {
+//        return;
+//    }
     int bytes = lame_encode_buffer_ieee_float(channel->lame, channel->waveout, NULL, WAVE_BATCH, lamebuf, 22000);
+	
+	//printf("MP3 %d", bytes);
+    
     if (bytes > 0) {
         int ret = shout_send(channel->shout, lamebuf, bytes);
+		//printf("MP3 process freq: %d, agcind %c, bytes %d   ",channel->frequency,channel->agcindicate,bytes);
+
+		if (channel->active == ' ' && channel->agcindicate == '*' && channel->ena_rec)
+		{
+			//Activity Changed open new File for write
+			char file[256];
+			time_t rawtime;
+			struct tm * ptm;
+			struct stat st = {0};
+
+			time (&rawtime);
+			ptm = gmtime(&rawtime);
+			
+			sprintf(file,"%s/%d",channel->recpath,channel->frequency);
+			if (stat(file, &st) == -1)
+			{
+				mkdir(file, 0755);
+			}
+  		
+			sprintf(file,"%s/%d/%d_%04d%02d%02d_%02d%02d%02d.mp3",channel->recpath,channel->frequency,channel->frequency,(ptm->tm_year+1900),ptm->tm_mon,ptm->tm_mday,ptm->tm_hour,ptm->tm_min,ptm->tm_sec);
+
+			//printf("rec START %s",file);
+			channel->mp3_file = fopen(file, "a");
+		//		write = lame_encode_buffer_ieee_float(channel->lame, channel->waveout, NULL, WAVE_BATCH, mp3_buffer, 22000);
+			if (channel->mp3_file != NULL)
+				fwrite(lamebuf, bytes, 1, channel->mp3_file);
+
+		
+		
+		}
+		else if (channel->active == '*' && channel->agcindicate == ' ' && channel->ena_rec)
+		{
+			
+	
+			if (channel->mp3_file != NULL)
+				fwrite(lamebuf, bytes, 1, channel->mp3_file);
+			if (channel->append == 0)
+			{
+				fclose(channel->mp3_file);
+				channel->mp3_file = NULL;
+				//printf("rec STOP");
+			}
+			else
+			{
+				channel->EndTime = time(0)*1000;
+				//printf("rec append s");
+			}
+
+		}
+		else if (channel->active == ' ' && channel->agcindicate == ' ' && channel->ena_rec)
+		{
+			//Check Append
+			if (channel->append != 0 && channel->append > (time(0)*1000 - channel->EndTime))
+			{
+				//Append trailing
+				if (channel->mp3_file != NULL)
+				{
+					fwrite(lamebuf, bytes, 1, channel->mp3_file);
+					//printf("rec append");
+				}
+			}
+			else if (channel->append != 0 && channel->mp3_file != NULL)
+			{
+				fclose(channel->mp3_file);
+				channel->mp3_file = NULL;
+				//printf("rsTOP");
+			}		
+		}
+		else if (channel->active == '*' && channel->agcindicate == '*' && channel->ena_rec)
+		{
+			//continuous record
+			if (channel->mp3_file != NULL)
+				fwrite(lamebuf, bytes, 1, channel->mp3_file);
+
+		}
+		channel->active = channel->agcindicate;
+		
+		if (channel->shout == NULL)
+		{
+			return;
+		}
+
         if (ret != SHOUTERR_SUCCESS || shout_queuelen(channel->shout) > MAX_SHOUT_QUEUELEN) {
             if (quiet && shout_queuelen(channel->shout) > MAX_SHOUT_QUEUELEN)
                 printf("Exceeded max backlog for %s:%d/%s, disconnecting\n",
@@ -684,10 +838,11 @@ int main(int argc, char* argv[]) {
             channel->agcavgslow = 0.5f;
             channel->agcmin = 100.0f;
             channel->agclow = 0;
+			channel->active = ' ';
 #ifdef _WIN32
             fscanf_s(f, "%120s %d %120s %d %120s %120s\n", channel->hostname, 120, &channel->port, channel->mountpoint, 120, &channel->frequency, channel->username, 120, channel->password, 120);
 #else
-            fscanf(f, "%120s %d %120s %d %120s %120s\n", channel->hostname, &channel->port, channel->mountpoint, &channel->frequency, channel->username, channel->password);
+            fscanf(f, "%120s %d %120s %d %120s %120s %d %120s %d\n", channel->hostname, &channel->port, channel->mountpoint, &channel->frequency, channel->username, channel->password, &channel->ena_rec, channel->recpath, &channel->append);
 #endif
             dev->bins[j] = (int)ceil((channel->frequency + SOURCE_RATE - dev->centerfreq + dev->correction) / (double)(SOURCE_RATE / FFT_SIZE) - 1.0f) % FFT_SIZE;
             mp3_setup(channel);
@@ -699,6 +854,8 @@ int main(int argc, char* argv[]) {
 #endif
     }
     fclose(f);
+	
+
 
     while (device_opened != device_count) {
         SLEEP(100);
